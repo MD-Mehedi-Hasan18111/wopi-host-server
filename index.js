@@ -9,20 +9,25 @@ const {
   HeadObjectCommand,
 } = require("@aws-sdk/client-s3");
 
-require("dotenv").config(); // Load .env file
+require("dotenv").config();
 
 const app = express();
 
-// Enable CORS for all origins
+// Enable CORS for all origins (⚠️ restrict to Collabora domain in production)
 app.use(
   cors({
     origin: "*",
     methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "X-WOPI-Lock",
+      "X-WOPI-OldLock",
+    ],
   })
 );
 
-app.use(bodyParser.json());
+app.use(bodyParser.raw({ type: "*/*", limit: "50mb" })); // raw body for PutFile
 
 const PORT = process.env.PORT || 5000;
 
@@ -33,22 +38,40 @@ const s3 = new S3Client({
     accessKeyId: process.env.AWS_ACCESS_KEY_ID,
     secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
   },
-  // forcePathStyle: true,
 });
 const BUCKET = process.env.S3_BUCKET;
 
 // Helper: generate token
-function generateToken(fileId) {
+function generateToken() {
   return crypto.randomBytes(16).toString("hex");
 }
 
 const tokenStore = {}; // { token: fileId }
 
-// 🔹 Get file metadata
-app.get("/wopi/files/:file_id", async (req, res) => {
-  const fileId = decodeURIComponent(req.params.file_id);
-  if (!fileId) return res.status(400).json({ error: "Missing file path" });
+// Middleware: validate access_token
+function validateToken(req, res, next) {
+  let token = req.query.access_token || req.headers["authorization"];
+  if (!token) {
+    return res.status(401).json({ error: "Missing access token" });
+  }
 
+  // Strip Bearer if present
+  token = token.replace(/^Bearer\\s+/i, "");
+
+  const fileId = tokenStore[token];
+  if (!fileId) {
+    return res.status(401).json({ error: "Invalid or expired token" });
+  }
+
+  // Attach fileId to request for use in routes
+  req.fileId = fileId;
+  req.token = token;
+  next();
+}
+
+// 🔹 Get file metadata
+app.get("/wopi/files/:file_id", validateToken, async (req, res) => {
+  const fileId = req.fileId; // from token
   try {
     const head = await s3.send(
       new HeadObjectCommand({ Bucket: BUCKET, Key: fileId })
@@ -72,10 +95,8 @@ app.get("/wopi/files/:file_id", async (req, res) => {
 });
 
 // 🔹 Get file contents from S3
-app.get("/wopi/files/:file_id/contents", async (req, res) => {
-  const fileId = decodeURIComponent(req.params.file_id);
-  if (!fileId) return res.status(400).json({ error: "Missing file path" });
-
+app.get("/wopi/files/:file_id/contents", validateToken, async (req, res) => {
+  const fileId = req.fileId;
   try {
     const command = new GetObjectCommand({ Bucket: BUCKET, Key: fileId });
     const data = await s3.send(command);
@@ -93,15 +114,13 @@ app.get("/wopi/files/:file_id/contents", async (req, res) => {
 });
 
 // 🔹 Save file contents back to S3
-app.post("/wopi/files/:file_id/contents", async (req, res) => {
-  const fileId = decodeURIComponent(req.params.file_id);
-  if (!fileId) return res.status(400).json({ error: "Missing file path" });
-
+app.post("/wopi/files/:file_id/contents", validateToken, async (req, res) => {
+  const fileId = req.fileId;
   try {
     const upload = new PutObjectCommand({
       Bucket: BUCKET,
       Key: fileId,
-      Body: req,
+      Body: req.body,
     });
 
     await s3.send(upload);
@@ -118,7 +137,7 @@ app.get("/access", (req, res) => {
   const fileId = req.query.path;
   if (!fileId) return res.status(400).json({ error: "Missing file path" });
 
-  const token = generateToken(fileId);
+  const token = generateToken();
   tokenStore[token] = fileId;
 
   const encodedFileId = encodeURIComponent(fileId);
