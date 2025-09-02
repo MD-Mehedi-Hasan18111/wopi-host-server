@@ -1,6 +1,5 @@
 const express = require("express");
 const bodyParser = require("body-parser");
-const crypto = require("crypto");
 const cors = require("cors");
 const {
   S3Client,
@@ -13,10 +12,9 @@ require("dotenv").config();
 
 const app = express();
 
-// Enable CORS for all origins (⚠️ restrict to Collabora domain in production)
 app.use(
   cors({
-    origin: "*",
+    origin: "*", // ⚠️ Allow all for testing; restrict in production
     methods: ["GET", "POST", "OPTIONS"],
     allowedHeaders: [
       "Content-Type",
@@ -27,7 +25,7 @@ app.use(
   })
 );
 
-app.use(bodyParser.raw({ type: "*/*", limit: "50mb" })); // raw body for PutFile
+app.use(bodyParser.raw({ type: "*/*", limit: "50mb" }));
 
 const PORT = process.env.PORT || 5000;
 
@@ -41,37 +39,23 @@ const s3 = new S3Client({
 });
 const BUCKET = process.env.S3_BUCKET;
 
-// Helper: generate token
-function generateToken() {
-  return crypto.randomBytes(16).toString("hex");
-}
-
-const tokenStore = {}; // { token: fileId }
-
-// Middleware: validate access_token
+// 🔹 Middleware: dummy access_token
 function validateToken(req, res, next) {
   let token = req.query.access_token || req.headers["authorization"];
-  if (!token) {
-    return res.status(401).json({ error: "Missing access token" });
+
+  // Always allow if token == "test"
+  if (!token || !token.includes("test")) {
+    return res.status(401).json({ error: "Invalid or missing access token" });
   }
 
-  // Strip Bearer if present
-  token = token.replace(/^Bearer\\s+/i, "");
-
-  const fileId = tokenStore[token];
-  if (!fileId) {
-    return res.status(401).json({ error: "Invalid or expired token" });
-  }
-
-  // Attach fileId to request for use in routes
-  req.fileId = fileId;
-  req.token = token;
+  // Use path parameter as fileId (no token store)
+  req.fileId = decodeURIComponent(req.params.file_id || req.query.path);
   next();
 }
 
 // 🔹 Get file metadata
 app.get("/wopi/files/:file_id", validateToken, async (req, res) => {
-  const fileId = req.fileId; // from token
+  const fileId = req.fileId;
   try {
     const head = await s3.send(
       new HeadObjectCommand({ Bucket: BUCKET, Key: fileId })
@@ -94,7 +78,7 @@ app.get("/wopi/files/:file_id", validateToken, async (req, res) => {
   }
 });
 
-// 🔹 Get file contents from S3
+// 🔹 Get file contents
 app.get("/wopi/files/:file_id/contents", validateToken, async (req, res) => {
   const fileId = req.fileId;
   try {
@@ -113,7 +97,7 @@ app.get("/wopi/files/:file_id/contents", validateToken, async (req, res) => {
   }
 });
 
-// 🔹 Save file contents back to S3
+// 🔹 Save file contents
 app.post("/wopi/files/:file_id/contents", validateToken, async (req, res) => {
   const fileId = req.fileId;
   try {
@@ -132,13 +116,10 @@ app.post("/wopi/files/:file_id/contents", validateToken, async (req, res) => {
   }
 });
 
-// 🔹 Generate access URL for frontend
+// 🔹 Generate test URL
 app.get("/access", (req, res) => {
   const fileId = req.query.path;
   if (!fileId) return res.status(400).json({ error: "Missing file path" });
-
-  const token = generateToken();
-  tokenStore[token] = fileId;
 
   const encodedFileId = encodeURIComponent(fileId);
   const WOPISrc = encodeURIComponent(
@@ -146,16 +127,14 @@ app.get("/access", (req, res) => {
   );
 
   res.json({
-    url: `${process.env.COLLABORA_DOMAIN}/loleaflet/dist/loleaflet.html?WOPISrc=${WOPISrc}&access_token=${token}`,
-    token,
+    url: `${process.env.COLLABORA_DOMAIN}/loleaflet/dist/loleaflet.html?WOPISrc=${WOPISrc}&access_token=test`,
+    token: "test",
   });
 });
 
-app.listen(PORT, () => console.log(`Running on http://localhost:${PORT}`));
-
-// Default route
+// Default
 app.get("/", (req, res) => {
-  res.send("WOPI Server Running...");
+  res.send("WOPI Server Running (dummy token mode)...");
 });
 
-module.exports = app;
+app.listen(PORT, () => console.log(`Running on http://localhost:${PORT}`));
