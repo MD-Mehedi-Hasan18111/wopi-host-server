@@ -127,7 +127,7 @@ app.get("/access", (req, res) => {
   );
 
   res.json({
-    url: `${process.env.COLLABORA_DOMAIN}/loleaflet/dist/loleaflet.html?WOPISrc=${WOPISrc}`,
+    url: `${process.env.COLLABORA_DOMAIN}/loleaflet/dist/loleaflet.html?WOPISrc=${WOPISrc}&access_token=test`,
     token: "test",
   });
 });
