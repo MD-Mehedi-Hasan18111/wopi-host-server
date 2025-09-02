@@ -1,6 +1,5 @@
 const express = require("express");
 const bodyParser = require("body-parser");
-const crypto = require("crypto");
 const cors = require("cors");
 const {
   S3Client,
@@ -9,45 +8,59 @@ const {
   HeadObjectCommand,
 } = require("@aws-sdk/client-s3");
 
-require("dotenv").config(); // Load .env file
+require("dotenv").config();
 
 const app = express();
 
-// Enable CORS for all origins
+// Enable CORS for Collabora
 app.use(
   cors({
     origin: "*",
     methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "X-WOPI-Lock",
+      "X-WOPI-OldLock",
+    ],
   })
 );
 
-app.use(bodyParser.json());
+// Use raw body for PUT
+app.use(bodyParser.raw({ type: "*/*", limit: "50mb" }));
 
 const PORT = process.env.PORT || 5000;
 
-// 🔹 AWS S3 Config
+// AWS S3 config
 const s3 = new S3Client({
   region: process.env.AWS_REGION,
   credentials: {
     accessKeyId: process.env.AWS_ACCESS_KEY_ID,
     secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
   },
-  // forcePathStyle: true,
 });
 const BUCKET = process.env.S3_BUCKET;
 
-// Helper: generate token
-function generateToken(fileId) {
-  return crypto.randomBytes(16).toString("hex");
+// Static token for simplicity
+const STATIC_TOKEN = "test_token";
+
+// In-memory locks: { fileId: lockToken }
+const locks = {};
+
+// Middleware: check token
+function validateToken(req, res, next) {
+  const token = req.query.access_token || req.headers["authorization"];
+  if (!token || token.replace(/^Bearer\s+/i, "") !== STATIC_TOKEN) {
+    return res.status(401).json({ error: "Invalid or missing token" });
+  }
+  next();
 }
 
-const tokenStore = {}; // { token: fileId }
+// -------------------- WOPI Endpoints --------------------
 
-// 🔹 Get file metadata
-app.get("/wopi/files/:file_id", async (req, res) => {
+// CheckFileInfo
+app.get("/wopi/files/:file_id", validateToken, async (req, res) => {
   const fileId = decodeURIComponent(req.params.file_id);
-  if (!fileId) return res.status(400).json({ error: "Missing file path" });
 
   try {
     const head = await s3.send(
@@ -62,6 +75,8 @@ app.get("/wopi/files/:file_id", async (req, res) => {
       Version: head.LastModified.getTime().toString(),
       SupportsUpdate: true,
       UserCanWrite: true,
+      SupportsLocks: true,
+      UserFriendlyName: "User1",
     };
 
     res.json(fileInfo);
@@ -71,14 +86,14 @@ app.get("/wopi/files/:file_id", async (req, res) => {
   }
 });
 
-// 🔹 Get file contents from S3
-app.get("/wopi/files/:file_id/contents", async (req, res) => {
+// GetFile
+app.get("/wopi/files/:file_id/contents", validateToken, async (req, res) => {
   const fileId = decodeURIComponent(req.params.file_id);
-  if (!fileId) return res.status(400).json({ error: "Missing file path" });
 
   try {
-    const command = new GetObjectCommand({ Bucket: BUCKET, Key: fileId });
-    const data = await s3.send(command);
+    const data = await s3.send(
+      new GetObjectCommand({ Bucket: BUCKET, Key: fileId })
+    );
 
     res.setHeader(
       "Content-Type",
@@ -92,20 +107,24 @@ app.get("/wopi/files/:file_id/contents", async (req, res) => {
   }
 });
 
-// 🔹 Save file contents back to S3
-app.post("/wopi/files/:file_id/contents", async (req, res) => {
+// PutFile
+app.post("/wopi/files/:file_id/contents", validateToken, async (req, res) => {
   const fileId = decodeURIComponent(req.params.file_id);
-  if (!fileId) return res.status(400).json({ error: "Missing file path" });
+  const lockHeader = req.headers["x-wopi-lock"];
+
+  // Check lock
+  if (locks[fileId] && locks[fileId] !== lockHeader) {
+    return res.status(409).json({ error: "File is locked by another user" });
+  }
 
   try {
-    const upload = new PutObjectCommand({
-      Bucket: BUCKET,
-      Key: fileId,
-      Body: req,
-    });
-
-    await s3.send(upload);
-
+    await s3.send(
+      new PutObjectCommand({
+        Bucket: BUCKET,
+        Key: fileId,
+        Body: req.body,
+      })
+    );
     res.status(200).end();
   } catch (err) {
     console.error("PutObject error:", err);
@@ -113,13 +132,60 @@ app.post("/wopi/files/:file_id/contents", async (req, res) => {
   }
 });
 
-// 🔹 Generate access URL for frontend
+// -------------------- Lock Endpoints --------------------
+
+// Lock
+app.post("/wopi/files/:file_id/lock", validateToken, (req, res) => {
+  const fileId = decodeURIComponent(req.params.file_id);
+  const lock = req.headers["x-wopi-lock"];
+
+  if (!lock)
+    return res.status(400).json({ error: "Missing X-WOPI-Lock header" });
+
+  if (locks[fileId] && locks[fileId] !== lock) {
+    return res.status(409).json({ error: "File already locked" });
+  }
+
+  locks[fileId] = lock;
+  res.status(200).end();
+});
+
+// Unlock
+app.post("/wopi/files/:file_id/unlock", validateToken, (req, res) => {
+  const fileId = decodeURIComponent(req.params.file_id);
+  const lock = req.headers["x-wopi-lock"];
+
+  if (!lock)
+    return res.status(400).json({ error: "Missing X-WOPI-Lock header" });
+
+  if (locks[fileId] !== lock) {
+    return res.status(409).json({ error: "Lock mismatch" });
+  }
+
+  delete locks[fileId];
+  res.status(200).end();
+});
+
+// RefreshLock
+app.post("/wopi/files/:file_id/refresh", validateToken, (req, res) => {
+  const fileId = decodeURIComponent(req.params.file_id);
+  const lock = req.headers["x-wopi-lock"];
+
+  if (!lock)
+    return res.status(400).json({ error: "Missing X-WOPI-Lock header" });
+
+  if (locks[fileId] !== lock) {
+    return res.status(409).json({ error: "Lock mismatch" });
+  }
+
+  // Simply keep the lock
+  res.status(200).end();
+});
+
+// -------------------- Generate Access URL --------------------
 app.get("/access", (req, res) => {
   const fileId = req.query.path;
   if (!fileId) return res.status(400).json({ error: "Missing file path" });
-
-  // const token = generateToken(fileId);
-  // tokenStore[token] = fileId;
 
   const encodedFileId = encodeURIComponent(fileId);
   const WOPISrc = encodeURIComponent(
@@ -127,16 +193,14 @@ app.get("/access", (req, res) => {
   );
 
   res.json({
-    url: `${process.env.COLLABORA_DOMAIN}/loleaflet/dist/loleaflet.html?WOPISrc=${WOPISrc}&access_token=test`,
-    token: "test",
+    url: `${process.env.COLLABORA_DOMAIN}/loleaflet/dist/loleaflet.html?WOPISrc=${WOPISrc}&access_token=${STATIC_TOKEN}`,
+    token: STATIC_TOKEN,
   });
 });
 
-app.listen(PORT, () => console.log(`Running on http://localhost:${PORT}`));
+// -------------------- Default --------------------
+app.get("/", (req, res) => res.send("WOPI Server Running..."));
 
-// Default route
-app.get("/", (req, res) => {
-  res.send("WOPI Server Running...");
-});
+app.listen(PORT, () => console.log(`Running on http://localhost:${PORT}`));
 
 module.exports = app;
