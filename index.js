@@ -1,5 +1,6 @@
 const express = require("express");
 const bodyParser = require("body-parser");
+const crypto = require("crypto");
 const cors = require("cors");
 const {
   S3Client,
@@ -8,24 +9,20 @@ const {
   HeadObjectCommand,
 } = require("@aws-sdk/client-s3");
 
-require("dotenv").config();
+require("dotenv").config(); // Load .env file
 
 const app = express();
 
+// Enable CORS for all origins
 app.use(
   cors({
-    origin: "*", // ⚠️ Allow all for testing; restrict in production
+    origin: "*",
     methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: [
-      "Content-Type",
-      "Authorization",
-      "X-WOPI-Lock",
-      "X-WOPI-OldLock",
-    ],
+    allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
 
-app.use(bodyParser.raw({ type: "*/*", limit: "50mb" }));
+app.use(bodyParser.json());
 
 const PORT = process.env.PORT || 5000;
 
@@ -36,26 +33,22 @@ const s3 = new S3Client({
     accessKeyId: process.env.AWS_ACCESS_KEY_ID,
     secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
   },
+  // forcePathStyle: true,
 });
 const BUCKET = process.env.S3_BUCKET;
 
-// 🔹 Middleware: dummy access_token
-function validateToken(req, res, next) {
-  let token = req.query.access_token || req.headers["authorization"];
-
-  // Always allow if token == "test"
-  if (!token || !token.includes("test")) {
-    return res.status(401).json({ error: "Invalid or missing access token" });
-  }
-
-  // Use path parameter as fileId (no token store)
-  req.fileId = decodeURIComponent(req.params.file_id || req.query.path);
-  next();
+// Helper: generate token
+function generateToken(fileId) {
+  return crypto.randomBytes(16).toString("hex");
 }
 
+const tokenStore = {}; // { token: fileId }
+
 // 🔹 Get file metadata
-app.get("/wopi/files/:fileId", async (req, res) => {
-  const fileId = req.params.fileId;
+app.get("/wopi/files/:file_id", async (req, res) => {
+  const fileId = decodeURIComponent(req.params.file_id);
+  if (!fileId) return res.status(400).json({ error: "Missing file path" });
+
   try {
     const head = await s3.send(
       new HeadObjectCommand({ Bucket: BUCKET, Key: fileId })
@@ -78,9 +71,11 @@ app.get("/wopi/files/:fileId", async (req, res) => {
   }
 });
 
-// 🔹 Get file contents
-app.get("/wopi/files/:fileId/contents", async (req, res) => {
-  const fileId = req.params.fileId;
+// 🔹 Get file contents from S3
+app.get("/wopi/files/:file_id/contents", async (req, res) => {
+  const fileId = decodeURIComponent(req.params.file_id);
+  if (!fileId) return res.status(400).json({ error: "Missing file path" });
+
   try {
     const command = new GetObjectCommand({ Bucket: BUCKET, Key: fileId });
     const data = await s3.send(command);
@@ -97,14 +92,16 @@ app.get("/wopi/files/:fileId/contents", async (req, res) => {
   }
 });
 
-// 🔹 Save file contents
-app.post("/wopi/files/:fileId/contents", async (req, res) => {
-  const fileId = req.params.fileId;
+// 🔹 Save file contents back to S3
+app.post("/wopi/files/:file_id/contents", async (req, res) => {
+  const fileId = decodeURIComponent(req.params.file_id);
+  if (!fileId) return res.status(400).json({ error: "Missing file path" });
+
   try {
     const upload = new PutObjectCommand({
       Bucket: BUCKET,
       Key: fileId,
-      Body: req.body,
+      Body: req,
     });
 
     await s3.send(upload);
@@ -116,10 +113,13 @@ app.post("/wopi/files/:fileId/contents", async (req, res) => {
   }
 });
 
-// 🔹 Generate test URL
+// 🔹 Generate access URL for frontend
 app.get("/access", (req, res) => {
   const fileId = req.query.path;
   if (!fileId) return res.status(400).json({ error: "Missing file path" });
+
+  // const token = generateToken(fileId);
+  // tokenStore[token] = fileId;
 
   const encodedFileId = encodeURIComponent(fileId);
   const WOPISrc = encodeURIComponent(
@@ -132,9 +132,11 @@ app.get("/access", (req, res) => {
   });
 });
 
-// Default
+app.listen(PORT, () => console.log(`Running on http://localhost:${PORT}`));
+
+// Default route
 app.get("/", (req, res) => {
-  res.send("WOPI Server Running (dummy token mode)...");
+  res.send("WOPI Server Running...");
 });
 
-app.listen(PORT, () => console.log(`Running on http://localhost:${PORT}`));
+module.exports = app;
