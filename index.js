@@ -193,7 +193,7 @@ app.get("/access", (req, res) => {
   );
 
   res.json({
-    url: `${process.env.COLLABORA_DOMAIN}/loleaflet/dist/loleaflet.html?WOPISrc=${WOPISrc}&access_token=${STATIC_TOKEN}`,
+    url: `${process.env.COLLABORA_DOMAIN}/browser/dist/cool.html?WOPISrc=${WOPISrc}&access_token=${STATIC_TOKEN}`,
     token: STATIC_TOKEN,
   });
 });
