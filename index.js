@@ -132,7 +132,11 @@ app.get("/access", (req, res) => {
   });
 });
 
-app.listen(PORT, () => {
-  // console.log(`WOPI Host running on http://localhost:${PORT}`);
-  console.log(`WOPI Host running`);
+app.listen(PORT, () => console.log(`Running on http://localhost:${PORT}`));
+
+// Default route
+app.get("/", (req, res) => {
+  res.send("WOPI Server Running...");
 });
+
+module.exports = app;
