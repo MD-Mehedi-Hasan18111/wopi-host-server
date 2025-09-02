@@ -54,7 +54,7 @@ function validateToken(req, res, next) {
 }
 
 // 🔹 Get file metadata
-app.get("/wopi/files/:file_id", validateToken, async (req, res) => {
+app.get("/wopi/files/:file_id", async (req, res) => {
   const fileId = req.fileId;
   try {
     const head = await s3.send(
@@ -79,7 +79,7 @@ app.get("/wopi/files/:file_id", validateToken, async (req, res) => {
 });
 
 // 🔹 Get file contents
-app.get("/wopi/files/:file_id/contents", validateToken, async (req, res) => {
+app.get("/wopi/files/:file_id/contents", async (req, res) => {
   const fileId = req.fileId;
   try {
     const command = new GetObjectCommand({ Bucket: BUCKET, Key: fileId });
@@ -98,7 +98,7 @@ app.get("/wopi/files/:file_id/contents", validateToken, async (req, res) => {
 });
 
 // 🔹 Save file contents
-app.post("/wopi/files/:file_id/contents", validateToken, async (req, res) => {
+app.post("/wopi/files/:file_id/contents", async (req, res) => {
   const fileId = req.fileId;
   try {
     const upload = new PutObjectCommand({
